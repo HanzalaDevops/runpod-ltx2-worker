@@ -1,12 +1,16 @@
 {
-    "input": {
-        "prompt": "A golden retriever playing fetch on a sunny beach, slow motion, cinematic lighting, 4K quality",
-        "negative_prompt": "blurry, low quality, distorted, glitchy, watermark, text",
-        "width": 1280,
-        "height": 720,
-        "num_frames": 97,
-        "fps": 24,
-        "guidance_scale": 7.5,
-        "num_inference_steps": 30
-    }
+  "input": {
+    "prompt": "A small red panda looking at the camera, highly detailed, photorealistic, synchronized audio of soft forest ambient sound.",
+    "negative_prompt": "blurry, low quality, static, deformed, noisy",
+    "width": 768,
+    "height": 512,
+    "num_frames": 49,
+    "frame_rate": 25.0,
+    "pipeline": "two_stage",
+    "quantization": "fp8-cast",
+    "offload_mode": "cpu",
+    "num_inference_steps": 30,
+    "video_cfg": 4.0,
+    "video_stg": 2.0
+  }
 }

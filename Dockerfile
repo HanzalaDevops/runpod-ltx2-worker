@@ -1,42 +1,51 @@
-# LTX-2 Video Generation Worker for RunPod Serverless
-# Optimized for H100 (80GB) - fastest generation
-
-FROM runpod/pytorch:2.4.0-py3.11-cuda12.4.1-devel-ubuntu22.04
+# Use a high-performance PyTorch base image with CUDA and developer tools
+FROM pytorch/pytorch:2.4.0-cuda12.1-cudnn9-devel
 
 # Set environment variables
+ENV DEBIAN_FRONTEND=noninteractive
 ENV PYTHONUNBUFFERED=1
-ENV HF_HOME=/runpod-volume/huggingface
-ENV TRANSFORMERS_CACHE=/runpod-volume/huggingface
-ENV TORCH_HOME=/runpod-volume/torch
+ENV HF_HUB_ENABLE_HF_TRANSFER=1
+ENV MODELS_ROOT=/workspace/models
 
-# Install system dependencies
-RUN apt-get update && apt-get install -y \
-    git-lfs \
+# Install system dependencies (ffmpeg is crucial for video/audio decoding/encoding)
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    git \
+    curl \
     ffmpeg \
+    libsm6 \
+    libxext6 \
+    libgl1 \
+    pkg-config \
+    build-essential \
+    cmake \
     && rm -rf /var/lib/apt/lists/*
 
 # Upgrade pip
 RUN pip install --upgrade pip
 
+# Install sub-packages directly from official Lightricks LTX-2 monorepo
+RUN pip install git+https://github.com/Lightricks/LTX-2.git#subdirectory=packages/ltx-core
+RUN pip install git+https://github.com/Lightricks/LTX-2.git#subdirectory=packages/ltx-pipelines
+
+# Install other serverless dependencies
+RUN pip install \
+    runpod \
+    boto3 \
+    huggingface_hub[hf_transfer] \
+    av \
+    tqdm \
+    pillow \
+    openimageio \
+    cloudpickle>=3.1
+
 # Create app directory
 WORKDIR /app
 
-# Install RunPod SDK
-RUN pip install runpod
+# Copy handler and download scripts
+COPY handler.py download_models.py ./
 
-# Install LTX-2 packages (use git install for latest)
-RUN pip install git+https://github.com/Lightricks/LTX-2.git
+# Expose target models path
+RUN mkdir -p /workspace/models
 
-# Install additional dependencies
-RUN pip install \
-    imageio \
-    imageio-ffmpeg \
-    accelerate \
-    safetensors \
-    huggingface_hub
-
-# Copy handler
-COPY handler.py /app/handler.py
-
-# Set the entrypoint
-CMD ["python", "-u", "/app/handler.py"]
+# Set the default entrypoint to runpod serverless handler
+CMD ["python", "-u", "handler.py"]

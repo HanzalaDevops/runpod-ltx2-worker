@@ -1,205 +1,191 @@
-"""
-RunPod Serverless Handler for LTX-2 Video Generation
-
-Simple API for generating videos with LTX-2.
-
-Input format:
-{
-    "input": {
-        "prompt": "A cat playing piano",
-        "negative_prompt": "blurry, low quality",  # optional
-        "width": 768,            # optional, default 768
-        "height": 512,           # optional, default 512
-        "num_frames": 97,        # optional, default 97 (~4 seconds at 24fps)
-        "fps": 24,               # optional, default 24
-        "guidance_scale": 7.5,   # optional, default 7.5
-        "num_inference_steps": 30,  # optional, default 30
-        "seed": null             # optional, random if not set
-    }
-}
-
-Output format:
-{
-    "video": "base64_encoded_mp4_data",
-    "duration_seconds": 4.04,
-    "resolution": "768x512",
-    "seed": 12345
-}
-"""
-
-import base64
 import os
-import subprocess
-import tempfile
-import time
-from typing import Optional
-
-import runpod
+import gc
+import uuid
+import urllib.request
 import torch
+import runpod
 
+# Import LTX-2 pipeline components
+from ltx_core.model.video_vae import TilingConfig, get_video_chunks_number
+from ltx_core.components.guiders import MultiModalGuiderParams
+from ltx_core.loader import LoraPathStrengthAndSDOps, LTXV_LORA_COMFY_RENAMING_MAP
+from ltx_pipelines.ti2vid_two_stages import TI2VidTwoStagesPipeline
+from ltx_pipelines.distilled import DistilledPipeline
+from ltx_pipelines.utils.quantization_factory import QuantizationKind
+from ltx_pipelines.utils.types import OffloadMode
+from ltx_pipelines.utils.media_io import encode_video
+from ltx_pipelines.utils.args import ImageConditioningInput
 
-# Global model cache
-PIPELINE = None
+# Global pipeline cache
+current_pipeline = None
+current_pipeline_name = None
+current_quantization = None
+current_offload_mode = None
 
+MODELS_ROOT = os.getenv("MODELS_ROOT", "/workspace/models")
+LTX_DIR = os.path.join(MODELS_ROOT, "ltx-2.3")
+GEMMA_DIR = os.path.join(MODELS_ROOT, "gemma-3-12b")
 
-def load_pipeline():
-    """Load LTX-2 pipeline (cached globally)."""
-    global PIPELINE
+def download_file(url, target_path):
+    print(f"Downloading input file from {url} to {target_path}...")
+    headers = {'User-Agent': 'Mozilla/5.0'}
+    req = urllib.request.Request(url, headers=headers)
+    with urllib.request.urlopen(req) as response, open(target_path, 'wb') as out_file:
+        out_file.write(response.read())
+    return target_path
 
-    if PIPELINE is not None:
-        return PIPELINE
-
-    print("Loading LTX-2 pipeline...")
-    start = time.time()
-
-    from ltx_pipelines.ti2vid_one_stage import TI2VidOneStagePipeline
-
-    PIPELINE = TI2VidOneStagePipeline.from_pretrained(
-        "Lightricks/LTX-2",
-        torch_dtype=torch.bfloat16,
-    )
-    PIPELINE.to("cuda")
-
-    print(f"Pipeline loaded in {time.time() - start:.1f}s")
-    return PIPELINE
-
-
-def generate_video(
-    prompt: str,
-    negative_prompt: str = "blurry, low quality, distorted, glitchy, watermark",
-    width: int = 768,
-    height: int = 512,
-    num_frames: int = 97,
-    fps: int = 24,
-    guidance_scale: float = 7.5,
-    num_inference_steps: int = 30,
-    seed: Optional[int] = None,
-) -> dict:
-    """Generate a video from text prompt."""
-
-    pipeline = load_pipeline()
-
-    # Set seed for reproducibility
-    if seed is None:
-        seed = torch.randint(0, 2**32, (1,)).item()
-
-    generator = torch.Generator("cuda").manual_seed(seed)
-
-    print(f"Generating video: {prompt[:50]}...")
-    print(f"  Resolution: {width}x{height}, Frames: {num_frames}")
-
-    start = time.time()
-
-    # Generate video
-    output = pipeline(
-        prompt=prompt,
-        negative_prompt=negative_prompt,
-        width=width,
-        height=height,
-        num_frames=num_frames,
-        guidance_scale=guidance_scale,
-        num_inference_steps=num_inference_steps,
-        generator=generator,
-    )
-
-    generation_time = time.time() - start
-    print(f"Generation completed in {generation_time:.1f}s")
-
-    # Get video frames - output.frames is a list of PIL images or tensors
-    frames = output.frames
-
-    # Create temporary directory for frames
-    with tempfile.TemporaryDirectory() as tmpdir:
-        frame_pattern = os.path.join(tmpdir, "frame_%04d.png")
-        output_path = os.path.join(tmpdir, "output.mp4")
-
-        # Save frames
-        for i, frame in enumerate(frames):
-            if hasattr(frame, 'save'):
-                # PIL Image
-                frame.save(frame_pattern % i)
-            else:
-                # Tensor or numpy array
-                from PIL import Image
-                import numpy as np
-                if torch.is_tensor(frame):
-                    frame = frame.cpu().numpy()
-                if frame.max() <= 1.0:
-                    frame = (frame * 255).astype(np.uint8)
-                if frame.shape[0] in [1, 3, 4]:  # CHW format
-                    frame = frame.transpose(1, 2, 0)
-                if frame.shape[-1] == 1:
-                    frame = frame.squeeze(-1)
-                Image.fromarray(frame).save(frame_pattern % i)
-
-        # Encode to MP4 using ffmpeg
-        subprocess.run([
-            "ffmpeg", "-y",
-            "-framerate", str(fps),
-            "-i", frame_pattern,
-            "-c:v", "libx264",
-            "-pix_fmt", "yuv420p",
-            "-crf", "18",
-            output_path
-        ], check=True, capture_output=True)
-
-        # Read and encode as base64
-        with open(output_path, "rb") as f:
-            video_bytes = f.read()
-
-    video_base64 = base64.b64encode(video_bytes).decode("utf-8")
-    duration = num_frames / fps
-
-    return {
-        "video": f"data:video/mp4;base64,{video_base64}",
-        "duration_seconds": round(duration, 2),
-        "resolution": f"{width}x{height}",
-        "fps": fps,
-        "seed": seed,
-        "generation_time_seconds": round(generation_time, 2),
-    }
-
-
-def handler(event: dict) -> dict:
-    """
-    RunPod handler function.
-
-    Args:
-        event: Dictionary with "input" key containing generation parameters
-
-    Returns:
-        Dictionary with generated video and metadata
-    """
-    try:
-        input_data = event.get("input", {})
-
-        # Validate required fields
-        prompt = input_data.get("prompt")
-        if not prompt:
-            return {"error": "Missing required field: prompt"}
-
-        # Extract optional parameters with defaults
-        result = generate_video(
-            prompt=prompt,
-            negative_prompt=input_data.get("negative_prompt", "blurry, low quality, distorted, glitchy, watermark"),
-            width=input_data.get("width", 768),
-            height=input_data.get("height", 512),
-            num_frames=input_data.get("num_frames", 97),
-            fps=input_data.get("fps", 24),
-            guidance_scale=input_data.get("guidance_scale", 7.5),
-            num_inference_steps=input_data.get("num_inference_steps", 30),
-            seed=input_data.get("seed"),
+def get_pipeline(pipeline_name, quantization_str, offload_str):
+    global current_pipeline, current_pipeline_name, current_quantization, current_offload_mode
+    
+    quantization_kind = QuantizationKind(quantization_str) if quantization_str else None
+    offload_mode = OffloadMode(offload_str) if offload_str else OffloadMode.NONE
+    
+    if (current_pipeline is not None and 
+        current_pipeline_name == pipeline_name and 
+        current_quantization == quantization_str and 
+        current_offload_mode == offload_str):
+        return current_pipeline
+    
+    if current_pipeline is not None:
+        print("Cleaning up old pipeline instance...")
+        del current_pipeline
+        current_pipeline = None
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+            
+    print(f"Initializing pipeline: {pipeline_name}...")
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    
+    if pipeline_name == "two_stage":
+        checkpoint_path = os.path.join(LTX_DIR, "ltx-2.3-22b-dev.safetensors")
+        distilled_lora_path = os.path.join(LTX_DIR, "ltx-2.3-22b-distilled-lora-384-1.1.safetensors")
+        spatial_upsampler_path = os.path.join(LTX_DIR, "ltx-2.3-spatial-upscaler-x2-1.1.safetensors")
+        
+        quantization_policy = quantization_kind.to_policy(checkpoint_path) if quantization_kind else None
+        distilled_lora = [LoraPathStrengthAndSDOps(distilled_lora_path, 1.0, LTXV_LORA_COMFY_RENAMING_MAP)]
+        
+        current_pipeline = TI2VidTwoStagesPipeline(
+            checkpoint_path=checkpoint_path,
+            distilled_lora=distilled_lora,
+            spatial_upsampler_path=spatial_upsampler_path,
+            gemma_root=GEMMA_DIR,
+            loras=[],
+            device=device,
+            quantization=quantization_policy,
+            offload_mode=offload_mode,
         )
+    elif pipeline_name == "distilled":
+        distilled_checkpoint_path = os.path.join(LTX_DIR, "ltx-2.3-22b-distilled-1.1.safetensors")
+        spatial_upsampler_path = os.path.join(LTX_DIR, "ltx-2.3-spatial-upscaler-x2-1.1.safetensors")
+        
+        quantization_policy = quantization_kind.to_policy(distilled_checkpoint_path) if quantization_kind else None
+        current_pipeline = DistilledPipeline(
+            distilled_checkpoint_path=distilled_checkpoint_path,
+            spatial_upsampler_path=spatial_upsampler_path,
+            gemma_root=GEMMA_DIR,
+            loras=[],
+            device=device,
+            quantization=quantization_policy,
+            offload_mode=offload_mode,
+        )
+    else:
+        raise ValueError(f"Unknown pipeline: {pipeline_name}")
+        
+    current_pipeline_name = pipeline_name
+    current_quantization = quantization_str
+    current_offload_mode = offload_str
+    return current_pipeline
 
-        return result
-
+def handler(event):
+    job_input = event.get("input", {})
+    if not job_input:
+        return {"error": "No input configuration provided."}
+        
+    prompt = job_input.get("prompt")
+    if not prompt:
+        return {"error": "A prompt must be provided."}
+        
+    negative_prompt = job_input.get("negative_prompt", "blurry, low quality, static, deformed, noisy")
+    seed = job_input.get("seed", 42)
+    height = job_input.get("height", 512)
+    width = job_input.get("width", 768)
+    num_frames = job_input.get("num_frames", 49) # Default shorter for fast dev cycles
+    frame_rate = job_input.get("frame_rate", 25.0)
+    
+    pipeline_name = job_input.get("pipeline", "two_stage")
+    quantization = job_input.get("quantization", "fp8-cast")
+    offload_mode = job_input.get("offload_mode", "cpu")
+    
+    num_inference_steps = job_input.get("num_inference_steps", 30)
+    video_cfg = job_input.get("video_cfg", 4.0)
+    video_stg = job_input.get("video_stg", 2.0)
+    audio_cfg = job_input.get("audio_cfg", 4.0)
+    audio_stg = job_input.get("audio_stg", 2.0)
+    
+    image_conditioning = job_input.get("image_conditioning", [])
+    temp_files = []
+    
+    try:
+        pipe = get_pipeline(
+            pipeline_name=pipeline_name,
+            quantization_str=quantization if quantization != "none" else None,
+            offload_str=offload_mode
+        )
+        
+        images_input = []
+        for idx, img_cond in enumerate(image_conditioning):
+            url = img_cond.get("url")
+            frame_idx = img_cond.get("frame_idx", 0)
+            strength = img_cond.get("strength", 1.0)
+            if url:
+                local_path = f"/tmp/{uuid.uuid4()}_{idx}.png"
+                download_file(url, local_path)
+                temp_files.append(local_path)
+                images_input.append(ImageConditioningInput(
+                    path=local_path, frame_idx=frame_idx, strength=strength
+                ))
+                
+        tiling_config = TilingConfig.default()
+        video_chunks_number = get_video_chunks_number(num_frames, tiling_config)
+        
+        if pipeline_name == "two_stage":
+            video_guider = MultiModalGuiderParams(cfg_scale=video_cfg, stg_scale=video_stg)
+            audio_guider = MultiModalGuiderParams(cfg_scale=audio_cfg, stg_scale=audio_stg)
+            
+            video_gen, audio_gen = pipe(
+                prompt=prompt, negative_prompt=negative_prompt, seed=seed,
+                height=height, width=width, num_frames=num_frames, frame_rate=frame_rate,
+                num_inference_steps=num_inference_steps, video_guider_params=video_guider,
+                audio_guider_params=audio_guider, images=images_input, tiling_config=tiling_config
+            )
+        else:
+            video_gen, audio_gen = pipe(
+                prompt=prompt, seed=seed, height=height, width=width,
+                num_frames=num_frames, frame_rate=frame_rate, images=images_input, tiling_config=tiling_config
+            )
+            
+        output_filename = f"/tmp/{uuid.uuid4()}.mp4"
+        temp_files.append(output_filename)
+        
+        encode_video(
+            video=video_gen, fps=frame_rate, audio=audio_gen,
+            output_path=output_filename, video_chunks_number=video_chunks_number
+        )
+        
+        video_url = runpod.upload_file(f"{uuid.uuid4()}.mp4", output_filename)
+        return {"status": "success", "video_url": video_url, "seed": seed}
+        
     except Exception as e:
         import traceback
-        return {
-            "error": str(e),
-            "traceback": traceback.format_exc()
-        }
+        return {"status": "failed", "error": str(e), "traceback": traceback.format_exc()}
+    finally:
+        for temp_file in temp_files:
+            if os.path.exists(temp_file):
+                os.remove(temp_file)
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
 
-
-# Start the serverless worker
-runpod.serverless.start({"handler": handler})
+if __name__ == "__main__":
+    runpod.serverless.start({"handler": handler})
