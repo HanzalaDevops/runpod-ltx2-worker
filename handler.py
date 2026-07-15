@@ -5,6 +5,8 @@ import urllib.request
 import torch
 import runpod
 
+from download_models import ensure_models
+
 # Import LTX-2 pipeline components
 from ltx_core.model.video_vae import TilingConfig, get_video_chunks_number
 from ltx_core.components.guiders import MultiModalGuiderParams
@@ -188,4 +190,8 @@ def handler(event):
             torch.cuda.empty_cache()
 
 if __name__ == "__main__":
+    # Populate the model weights before serving. On a mounted network volume
+    # (MODELS_ROOT=/runpod-volume/models) this downloads once and every later
+    # cold start reuses the cached files instead of re-pulling from HuggingFace.
+    ensure_models(MODELS_ROOT)
     runpod.serverless.start({"handler": handler})
