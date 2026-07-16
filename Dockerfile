@@ -4,7 +4,12 @@ FROM pytorch/pytorch:2.4.0-cuda12.1-cudnn9-devel
 # Set environment variables
 ENV DEBIAN_FRONTEND=noninteractive
 ENV PYTHONUNBUFFERED=1
-ENV HF_HUB_ENABLE_HF_TRANSFER=1
+# Download via the classic LFS/HTTP path rather than HuggingFace's Xet backend.
+# hf_xet dies parsing content hashes ("Unable to parse string as hex hash value")
+# against Xet-backed repos such as google/gemma-3; the LFS path fetches the same
+# files without incident. HF_HUB_ENABLE_HF_TRANSFER is gone because hf_transfer
+# is no longer used at all -- setting it only produced a deprecation warning.
+ENV HF_HUB_DISABLE_XET=1
 ENV MODELS_ROOT=/workspace/models
 
 # Install system dependencies (ffmpeg is crucial for video/audio decoding/encoding)
@@ -44,7 +49,7 @@ RUN pip install --no-cache-dir "git+https://github.com/Lightricks/LTX-2.git@${LT
 RUN pip install \
     runpod \
     boto3 \
-    huggingface_hub[hf_transfer] \
+    huggingface_hub \
     av \
     tqdm \
     pillow \

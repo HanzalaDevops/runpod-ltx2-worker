@@ -1,6 +1,6 @@
 runpod
 boto3
-huggingface_hub[hf_transfer]
+huggingface_hub
 av
 tqdm
 pillow

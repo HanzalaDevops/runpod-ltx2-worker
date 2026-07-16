@@ -2,8 +2,6 @@ import os
 import argparse
 from huggingface_hub import hf_hub_download, snapshot_download
 
-os.environ["HF_HUB_ENABLE_HF_TRANSFER"] = "1"
-
 LTX_REPO = "Lightricks/LTX-2.3"
 GEMMA_REPO = "google/gemma-3-12b-it-qat-q4_0-unquantized"
 
