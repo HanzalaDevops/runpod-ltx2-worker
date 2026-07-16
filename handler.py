@@ -4,6 +4,7 @@ import uuid
 import urllib.request
 import torch
 import runpod
+from runpod.serverless.utils import rp_upload
 
 from download_models import ensure_models
 
@@ -27,6 +28,62 @@ current_offload_mode = None
 MODELS_ROOT = os.getenv("MODELS_ROOT", "/workspace/models")
 LTX_DIR = os.path.join(MODELS_ROOT, "ltx-2.3")
 GEMMA_DIR = os.path.join(MODELS_ROOT, "gemma-3-12b")
+
+S3_CRED_KEYS = ("endpointUrl", "accessId", "accessSecret")
+S3_REQUIRED_KEYS = S3_CRED_KEYS + ("bucketName",)
+
+
+def resolve_s3_config(job_input):
+    """Resolve the destination bucket for this job's video.
+
+    RunPod hands the handler only the job id and input, so per-request bucket
+    config has to travel in input.s3_config -- HTTP headers sent to /run are
+    consumed by RunPod's gateway and never reach here. Endpoint BUCKET_* env
+    vars act as a fallback so a single-bucket deployment can keep its secrets
+    out of request payloads entirely.
+
+    Returns None when neither source is configured. Raises ValueError naming
+    only the missing keys, never their values.
+    """
+    config = job_input.get("s3_config") or {}
+
+    if not config:
+        from_env = {
+            "endpointUrl": os.getenv("BUCKET_ENDPOINT_URL"),
+            "accessId": os.getenv("BUCKET_ACCESS_KEY_ID"),
+            "accessSecret": os.getenv("BUCKET_SECRET_ACCESS_KEY"),
+            "bucketName": os.getenv("BUCKET_NAME"),
+        }
+        config = from_env if all(from_env.values()) else {}
+
+    if not config:
+        return None
+
+    missing = [key for key in S3_REQUIRED_KEYS if not config.get(key)]
+    if missing:
+        raise ValueError(f"s3_config is missing required keys: {', '.join(missing)}")
+
+    return config
+
+
+def upload_video(output_path, job_input):
+    """Upload the rendered video and return a presigned URL valid for 7 days."""
+    s3_config = resolve_s3_config(job_input)
+    if s3_config is None:
+        raise ValueError(
+            "No bucket configured. Pass input.s3_config with endpointUrl, "
+            "accessId, accessSecret and bucketName, or set the BUCKET_* "
+            "environment variables on the endpoint."
+        )
+
+    return rp_upload.upload_file_to_bucket(
+        file_name=f"{uuid.uuid4()}.mp4",
+        file_location=output_path,
+        bucket_creds={key: s3_config[key] for key in S3_CRED_KEYS},
+        bucket_name=s3_config["bucketName"],
+        prefix=job_input.get("s3_prefix"),
+    )
+
 
 def download_file(url, target_path):
     print(f"Downloading input file from {url} to {target_path}...")
@@ -175,7 +232,7 @@ def handler(event):
             output_path=output_filename, video_chunks_number=video_chunks_number
         )
         
-        video_url = runpod.upload_file(f"{uuid.uuid4()}.mp4", output_filename)
+        video_url = upload_video(output_filename, job_input)
         return {"status": "success", "video_url": video_url, "seed": seed}
         
     except Exception as e:
