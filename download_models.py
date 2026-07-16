@@ -15,13 +15,37 @@ LTX_FILES = [
 ]
 
 
+COMPLETION_MARKER = ".download-complete"
+
+
+def _is_complete(directory):
+    return os.path.exists(os.path.join(directory, COMPLETION_MARKER))
+
+
+def _mark_complete(directory):
+    with open(os.path.join(directory, COMPLETION_MARKER), "w") as marker:
+        marker.write("ok\n")
+
+
 def ensure_models(target_dir):
-    """Download LTX-2.3 + Gemma-3 weights into target_dir, skipping any that
-    already exist.
+    """Download LTX-2.3 + Gemma-3 weights into target_dir.
 
     When target_dir is a mounted network volume, files persist across workers,
     so the first cold start populates the volume and every later start reuses
     it instead of re-downloading ~120 GB from HuggingFace.
+
+    Completion is tracked with a marker file written only after a download
+    returns successfully. Never infer completion from the presence of an
+    individual file: snapshot_download fetches in parallel, so a 1 KB
+    config.json lands in milliseconds while the 24 GB of shards take minutes.
+    Any interruption in that window leaves the small files on disk and the
+    large ones missing, and a per-file check then reports "already present"
+    forever while the encoder is silently unusable.
+
+    Until the marker exists, the download helpers are re-invoked on every
+    start. That is cheap when the files are already there -- both verify
+    etags and skip complete files -- and it repairs a partial volume rather
+    than wedging on it.
     """
     models_dir = os.path.abspath(target_dir)
     ltx_dir = os.path.join(models_dir, "ltx-2.3")
@@ -31,28 +55,27 @@ def ensure_models(target_dir):
 
     token = os.getenv("HF_TOKEN")
 
-    for filename in LTX_FILES:
-        target_path = os.path.join(ltx_dir, filename)
-        if os.path.exists(target_path):
-            print(f"[models] {filename} already present, skipping")
-            continue
-        print(f"[models] downloading {filename}...")
-        hf_hub_download(repo_id=LTX_REPO, filename=filename, local_dir=ltx_dir, token=token)
-        print(f"[models] downloaded {filename}")
-
-    # A populated config.json is a reliable marker that the Gemma snapshot
-    # completed; snapshot_download also re-verifies and skips existing files.
-    if os.path.exists(os.path.join(gemma_dir, "config.json")):
-        print("[models] gemma-3 already present, skipping")
+    if _is_complete(ltx_dir):
+        print("[models] ltx-2.3 complete, skipping")
     else:
-        print("[models] downloading gemma-3...")
+        for filename in LTX_FILES:
+            print(f"[models] ensuring {filename}...")
+            hf_hub_download(repo_id=LTX_REPO, filename=filename, local_dir=ltx_dir, token=token)
+        _mark_complete(ltx_dir)
+        print("[models] ltx-2.3 complete")
+
+    if _is_complete(gemma_dir):
+        print("[models] gemma-3 complete, skipping")
+    else:
+        print("[models] ensuring gemma-3...")
         snapshot_download(
             repo_id=GEMMA_REPO,
             local_dir=gemma_dir,
             token=token,
             ignore_patterns=["*.msgpack", "*.h5", "*.ot"],
         )
-        print("[models] downloaded gemma-3")
+        _mark_complete(gemma_dir)
+        print("[models] gemma-3 complete")
 
     return ltx_dir, gemma_dir
 
