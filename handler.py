@@ -156,6 +156,13 @@ def get_pipeline(pipeline_name, quantization_str, offload_str):
     current_offload_mode = offload_str
     return current_pipeline
 
+# Upstream guards its CLI entrypoint (ti2vid_two_stages.main) with this, not the
+# pipeline class, so calling TI2VidTwoStagesPipeline directly leaves autograd on.
+# The weights load as inference tensors, autograd then tries to save them for a
+# backward pass that will never happen, and the first F.linear of the first
+# denoising step dies with "Inference tensors cannot be saved for backward".
+# Covers construction as well as the call, exactly as main() does.
+@torch.inference_mode()
 def handler(event):
     job_input = event.get("input", {})
     if not job_input:
