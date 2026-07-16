@@ -54,7 +54,7 @@ RUN pip install \
     tqdm \
     pillow \
     openimageio \
-    cloudpickle>=3.1
+    "cloudpickle>=3.1"
 
 # Create app directory
 WORKDIR /app

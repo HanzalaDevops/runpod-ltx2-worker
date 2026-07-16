@@ -8,9 +8,18 @@ GEMMA_REPO = "google/gemma-3-12b-it-qat-q4_0-unquantized"
 
 LTX_FILES = [
     "ltx-2.3-22b-dev.safetensors",
-    "ltx-2.3-22b-distilled-1.1.safetensors",
     "ltx-2.3-spatial-upscaler-x2-1.1.safetensors",
     "ltx-2.3-22b-distilled-lora-384-1.1.safetensors",
+]
+
+# Downloaded by earlier versions and left behind on any volume they touched.
+# Only the `distilled` pipeline loads this checkpoint; `two_stage` -- the
+# default and the only one in use -- does not. At 46 GB it was the difference
+# between the weights fitting alongside everything else on the volume and
+# failing mid-download with EDQUOT, so it is actively deleted rather than
+# merely no longer fetched.
+OBSOLETE_LTX_FILES = [
+    "ltx-2.3-22b-distilled-1.1.safetensors",
 ]
 
 
@@ -24,6 +33,21 @@ def _is_complete(directory):
 def _mark_complete(directory):
     with open(os.path.join(directory, COMPLETION_MARKER), "w") as marker:
         marker.write("ok\n")
+
+
+def _prune(directory, filenames):
+    """Delete named files we no longer need, freeing volume space.
+
+    Runs outside the completion-marker check on purpose: a volume marked
+    complete by an older version still holds whatever that version fetched,
+    and nothing else would ever reclaim it.
+    """
+    for name in filenames:
+        path = os.path.join(directory, name)
+        if os.path.exists(path):
+            size_gb = os.path.getsize(path) / 1e9
+            os.remove(path)
+            print(f"[models] removed obsolete {name} ({size_gb:.1f} GB reclaimed)")
 
 
 def _reset(directory):
@@ -70,6 +94,8 @@ def ensure_models(target_dir):
     os.makedirs(gemma_dir, exist_ok=True)
 
     token = os.getenv("HF_TOKEN")
+
+    _prune(ltx_dir, OBSOLETE_LTX_FILES)
 
     if _is_complete(ltx_dir):
         print("[models] ltx-2.3 complete, skipping")
