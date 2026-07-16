@@ -1,5 +1,6 @@
 import os
 import argparse
+import shutil
 from huggingface_hub import hf_hub_download, snapshot_download
 
 LTX_REPO = "Lightricks/LTX-2.3"
@@ -25,6 +26,19 @@ def _mark_complete(directory):
         marker.write("ok\n")
 
 
+def _reset(directory):
+    """Delete a directory's contents so a download starts from a clean slate.
+
+    An interrupted snapshot_download leaves scratch files behind that nothing
+    ever reclaims. Each crash-and-restart adds another set, and on a network
+    volume they accumulate silently until it fills and every write fails with
+    EDQUOT -- which reads like "the model is too big" rather than "we leaked
+    100 GB of temp files". Re-downloading is bounded and cheap; leaking is not.
+    """
+    shutil.rmtree(directory, ignore_errors=True)
+    os.makedirs(directory, exist_ok=True)
+
+
 def ensure_models(target_dir):
     """Download LTX-2.3 + Gemma-3 weights into target_dir.
 
@@ -41,9 +55,13 @@ def ensure_models(target_dir):
     forever while the encoder is silently unusable.
 
     Until the marker exists, the download helpers are re-invoked on every
-    start. That is cheap when the files are already there -- both verify
-    etags and skip complete files -- and it repairs a partial volume rather
-    than wedging on it.
+    start, so a partial volume repairs itself rather than wedging.
+
+    Gemma is reset before each attempt instead of resumed. Resuming looks
+    cheaper but leaks: every interrupted snapshot_download strands scratch
+    files, and a crash loop piles up one set per restart until the volume is
+    full and writes fail with EDQUOT. Bounded re-downloads beat unbounded
+    leaks. LTX is not reset -- it is 100 GB and already marked complete.
     """
     models_dir = os.path.abspath(target_dir)
     ltx_dir = os.path.join(models_dir, "ltx-2.3")
@@ -65,6 +83,8 @@ def ensure_models(target_dir):
     if _is_complete(gemma_dir):
         print("[models] gemma-3 complete, skipping")
     else:
+        print("[models] resetting partial gemma-3 download...")
+        _reset(gemma_dir)
         print("[models] ensuring gemma-3...")
         snapshot_download(
             repo_id=GEMMA_REPO,
