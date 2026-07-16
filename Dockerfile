@@ -23,9 +23,22 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # Upgrade pip
 RUN pip install --upgrade pip
 
-# Install sub-packages directly from official Lightricks LTX-2 monorepo
-RUN pip install git+https://github.com/Lightricks/LTX-2.git#subdirectory=packages/ltx-core
-RUN pip install git+https://github.com/Lightricks/LTX-2.git#subdirectory=packages/ltx-pipelines
+# Pin the torch stack before installing ltx-*. The base image ships torch and
+# torchaudio 2.4.0; ltx-core requires torch~=2.7, so pip upgrades torch but
+# leaves torchaudio untouched (its bare requirement is already satisfied). The
+# stale torchaudio is then built against a libtorch it no longer has, and
+# importing it dies on an undefined torch::autograd symbol. These three
+# versions are the matched set that upstream's uv.lock resolves to.
+RUN pip install --no-cache-dir \
+    torch==2.9.1 \
+    torchaudio==2.9.1 \
+    torchvision==0.24.1
+
+# Install sub-packages from the official Lightricks LTX-2 monorepo, pinned to
+# the commit whose uv.lock produced the torch versions above.
+ARG LTX_REF=9377758131b1ffde4b7f766804590a6617bf2ab9
+RUN pip install --no-cache-dir "git+https://github.com/Lightricks/LTX-2.git@${LTX_REF}#subdirectory=packages/ltx-core"
+RUN pip install --no-cache-dir "git+https://github.com/Lightricks/LTX-2.git@${LTX_REF}#subdirectory=packages/ltx-pipelines"
 
 # Install other serverless dependencies
 RUN pip install \
