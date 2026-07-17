@@ -6,11 +6,8 @@
     "height": 512,
     "num_frames": 49,
     "frame_rate": 25.0,
-    "pipeline": "two_stage",
+    "pipeline": "distilled",
     "quantization": "fp8-cast",
-    "offload_mode": "cpu",
-    "num_inference_steps": 30,
-    "video_cfg": 4.0,
-    "video_stg": 2.0
+    "offload_mode": "cpu"
   }
 }

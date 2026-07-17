@@ -135,15 +135,22 @@ def get_pipeline(pipeline_name, quantization_str, offload_str):
             offload_mode=offload_mode,
         )
     elif pipeline_name == "distilled":
-        distilled_checkpoint_path = os.path.join(LTX_DIR, "ltx-2.3-22b-distilled-1.1.safetensors")
+        # The 46 GB standalone distilled checkpoint was pruned from the volume;
+        # dev checkpoint + distilled LoRA at strength 1.0 is the same model
+        # (the LoRA is the distillation delta, exactly what two_stage applies
+        # to its stage 2). DistilledPipeline reads VAE/text-encoder weights
+        # from the same file, and dev carries those components too.
+        checkpoint_path = os.path.join(LTX_DIR, "ltx-2.3-22b-dev.safetensors")
+        distilled_lora_path = os.path.join(LTX_DIR, "ltx-2.3-22b-distilled-lora-384-1.1.safetensors")
         spatial_upsampler_path = os.path.join(LTX_DIR, "ltx-2.3-spatial-upscaler-x2-1.1.safetensors")
-        
-        quantization_policy = quantization_kind.to_policy(distilled_checkpoint_path) if quantization_kind else None
+
+        quantization_policy = quantization_kind.to_policy(checkpoint_path) if quantization_kind else None
+        distilled_lora = [LoraPathStrengthAndSDOps(distilled_lora_path, 1.0, LTXV_LORA_COMFY_RENAMING_MAP)]
         current_pipeline = DistilledPipeline(
-            distilled_checkpoint_path=distilled_checkpoint_path,
+            distilled_checkpoint_path=checkpoint_path,
             spatial_upsampler_path=spatial_upsampler_path,
             gemma_root=GEMMA_DIR,
-            loras=[],
+            loras=distilled_lora,
             device=device,
             quantization=quantization_policy,
             offload_mode=offload_mode,
@@ -179,7 +186,10 @@ def handler(event):
     num_frames = job_input.get("num_frames", 49) # Default shorter for fast dev cycles
     frame_rate = job_input.get("frame_rate", 25.0)
     
-    pipeline_name = job_input.get("pipeline", "two_stage")
+    # Default is the distilled path: dev checkpoint + distilled LoRA on a fixed
+    # 8-step (+3 refine) sigma schedule. num_inference_steps and the cfg/stg
+    # knobs only apply when the caller opts into pipeline="two_stage".
+    pipeline_name = job_input.get("pipeline", "distilled")
     quantization = job_input.get("quantization", "fp8-cast")
     offload_mode = job_input.get("offload_mode", "cpu")
     

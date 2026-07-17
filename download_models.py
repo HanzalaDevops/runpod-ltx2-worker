@@ -13,11 +13,11 @@ LTX_FILES = [
 ]
 
 # Downloaded by earlier versions and left behind on any volume they touched.
-# Only the `distilled` pipeline loads this checkpoint; `two_stage` -- the
-# default and the only one in use -- does not. At 46 GB it was the difference
-# between the weights fitting alongside everything else on the volume and
-# failing mid-download with EDQUOT, so it is actively deleted rather than
-# merely no longer fetched.
+# No pipeline loads this checkpoint anymore: `distilled` now runs the dev
+# checkpoint with the distilled LoRA applied, which is the same model. At
+# 46 GB it was the difference between the weights fitting alongside
+# everything else on the volume and failing mid-download with EDQUOT, so it
+# is actively deleted rather than merely no longer fetched.
 OBSOLETE_LTX_FILES = [
     "ltx-2.3-22b-distilled-1.1.safetensors",
 ]
