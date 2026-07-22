@@ -10,9 +10,6 @@ from download_models import ensure_models
 
 # Import LTX-2 pipeline components
 from ltx_core.model.video_vae import TilingConfig, get_video_chunks_number
-from ltx_core.components.guiders import MultiModalGuiderParams
-from ltx_core.loader import LoraPathStrengthAndSDOps, LTXV_LORA_COMFY_RENAMING_MAP
-from ltx_pipelines.ti2vid_two_stages import TI2VidTwoStagesPipeline
 from ltx_pipelines.distilled import DistilledPipeline
 from ltx_pipelines.utils.quantization_factory import QuantizationKind
 from ltx_pipelines.utils.types import OffloadMode
@@ -115,18 +112,17 @@ def get_pipeline(pipeline_name, quantization_str, offload_str):
             
     print(f"Initializing pipeline: {pipeline_name}...")
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    
-    if pipeline_name == "two_stage":
-        checkpoint_path = os.path.join(LTX_DIR, "ltx-2.3-22b-dev.safetensors")
-        distilled_lora_path = os.path.join(LTX_DIR, "ltx-2.3-22b-distilled-lora-384-1.1.safetensors")
+
+    if pipeline_name == "distilled":
+        # This deployment ships only the standalone distilled checkpoint; the
+        # file carries VAE and text-encoder projection weights alongside the
+        # transformer, so no LoRA and no dev checkpoint are involved.
+        checkpoint_path = os.path.join(LTX_DIR, "ltx-2.3-22b-distilled-1.1.safetensors")
         spatial_upsampler_path = os.path.join(LTX_DIR, "ltx-2.3-spatial-upscaler-x2-1.1.safetensors")
-        
+
         quantization_policy = quantization_kind.to_policy(checkpoint_path) if quantization_kind else None
-        distilled_lora = [LoraPathStrengthAndSDOps(distilled_lora_path, 1.0, LTXV_LORA_COMFY_RENAMING_MAP)]
-        
-        current_pipeline = TI2VidTwoStagesPipeline(
-            checkpoint_path=checkpoint_path,
-            distilled_lora=distilled_lora,
+        current_pipeline = DistilledPipeline(
+            distilled_checkpoint_path=checkpoint_path,
             spatial_upsampler_path=spatial_upsampler_path,
             gemma_root=GEMMA_DIR,
             loras=[],
@@ -134,41 +130,23 @@ def get_pipeline(pipeline_name, quantization_str, offload_str):
             quantization=quantization_policy,
             offload_mode=offload_mode,
         )
-    elif pipeline_name == "distilled":
-        # The 46 GB standalone distilled checkpoint was pruned from the volume;
-        # dev checkpoint + distilled LoRA at strength 1.0 is the same model
-        # (the LoRA is the distillation delta, exactly what two_stage applies
-        # to its stage 2). DistilledPipeline reads VAE/text-encoder weights
-        # from the same file, and dev carries those components too.
-        checkpoint_path = os.path.join(LTX_DIR, "ltx-2.3-22b-dev.safetensors")
-        distilled_lora_path = os.path.join(LTX_DIR, "ltx-2.3-22b-distilled-lora-384-1.1.safetensors")
-        spatial_upsampler_path = os.path.join(LTX_DIR, "ltx-2.3-spatial-upscaler-x2-1.1.safetensors")
-
-        quantization_policy = quantization_kind.to_policy(checkpoint_path) if quantization_kind else None
-        distilled_lora = [LoraPathStrengthAndSDOps(distilled_lora_path, 1.0, LTXV_LORA_COMFY_RENAMING_MAP)]
-        current_pipeline = DistilledPipeline(
-            distilled_checkpoint_path=checkpoint_path,
-            spatial_upsampler_path=spatial_upsampler_path,
-            gemma_root=GEMMA_DIR,
-            loras=distilled_lora,
-            device=device,
-            quantization=quantization_policy,
-            offload_mode=offload_mode,
-        )
     else:
-        raise ValueError(f"Unknown pipeline: {pipeline_name}")
+        raise ValueError(
+            f"Unknown pipeline: {pipeline_name}. This deployment serves only "
+            "the distilled model; omit 'pipeline' or pass 'distilled'."
+        )
         
     current_pipeline_name = pipeline_name
     current_quantization = quantization_str
     current_offload_mode = offload_str
     return current_pipeline
 
-# Upstream guards its CLI entrypoint (ti2vid_two_stages.main) with this, not the
-# pipeline class, so calling TI2VidTwoStagesPipeline directly leaves autograd on.
-# The weights load as inference tensors, autograd then tries to save them for a
-# backward pass that will never happen, and the first F.linear of the first
-# denoising step dies with "Inference tensors cannot be saved for backward".
-# Covers construction as well as the call, exactly as main() does.
+# Upstream guards its CLI entrypoints with this, not the pipeline classes, so
+# calling DistilledPipeline directly leaves autograd on. The weights load as
+# inference tensors, autograd then tries to save them for a backward pass that
+# will never happen, and the first F.linear of the first denoising step dies
+# with "Inference tensors cannot be saved for backward". Covers construction
+# as well as the call, exactly as upstream's main() does.
 @torch.inference_mode()
 def handler(event):
     job_input = event.get("input", {})
@@ -179,26 +157,21 @@ def handler(event):
     if not prompt:
         return {"error": "A prompt must be provided."}
         
-    negative_prompt = job_input.get("negative_prompt", "blurry, low quality, static, deformed, noisy")
+    # negative_prompt is intentionally not read: the distilled pipeline runs
+    # guidance-free on its fixed sigma schedule and has no negative-prompt input.
     seed = job_input.get("seed", 42)
     height = job_input.get("height", 512)
     width = job_input.get("width", 768)
     num_frames = job_input.get("num_frames", 49) # Default shorter for fast dev cycles
     frame_rate = job_input.get("frame_rate", 25.0)
     
-    # Default is the distilled path: dev checkpoint + distilled LoRA on a fixed
-    # 8-step (+3 refine) sigma schedule. num_inference_steps and the cfg/stg
-    # knobs only apply when the caller opts into pipeline="two_stage".
+    # Only the distilled pipeline exists in this deployment. It runs a fixed
+    # 8-step (+3 refine) sigma schedule, so num_inference_steps and the
+    # cfg/stg guidance knobs of the two-stage pipeline do not apply here.
     pipeline_name = job_input.get("pipeline", "distilled")
     quantization = job_input.get("quantization", "fp8-cast")
     offload_mode = job_input.get("offload_mode", "cpu")
-    
-    num_inference_steps = job_input.get("num_inference_steps", 30)
-    video_cfg = job_input.get("video_cfg", 4.0)
-    video_stg = job_input.get("video_stg", 2.0)
-    audio_cfg = job_input.get("audio_cfg", 4.0)
-    audio_stg = job_input.get("audio_stg", 2.0)
-    
+
     image_conditioning = job_input.get("image_conditioning", [])
     temp_files = []
     
@@ -224,23 +197,12 @@ def handler(event):
                 
         tiling_config = TilingConfig.default()
         video_chunks_number = get_video_chunks_number(num_frames, tiling_config)
-        
-        if pipeline_name == "two_stage":
-            video_guider = MultiModalGuiderParams(cfg_scale=video_cfg, stg_scale=video_stg)
-            audio_guider = MultiModalGuiderParams(cfg_scale=audio_cfg, stg_scale=audio_stg)
-            
-            video_gen, audio_gen = pipe(
-                prompt=prompt, negative_prompt=negative_prompt, seed=seed,
-                height=height, width=width, num_frames=num_frames, frame_rate=frame_rate,
-                num_inference_steps=num_inference_steps, video_guider_params=video_guider,
-                audio_guider_params=audio_guider, images=images_input, tiling_config=tiling_config
-            )
-        else:
-            video_gen, audio_gen = pipe(
-                prompt=prompt, seed=seed, height=height, width=width,
-                num_frames=num_frames, frame_rate=frame_rate, images=images_input, tiling_config=tiling_config
-            )
-            
+
+        video_gen, audio_gen = pipe(
+            prompt=prompt, seed=seed, height=height, width=width,
+            num_frames=num_frames, frame_rate=frame_rate, images=images_input, tiling_config=tiling_config
+        )
+
         output_filename = f"/tmp/{uuid.uuid4()}.mp4"
         temp_files.append(output_filename)
         

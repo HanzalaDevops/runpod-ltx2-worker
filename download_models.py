@@ -6,32 +6,46 @@ from huggingface_hub import hf_hub_download, snapshot_download
 LTX_REPO = "Lightricks/LTX-2.3"
 GEMMA_REPO = "google/gemma-3-12b-it-qat-q4_0-unquantized"
 
+# This deployment serves ONLY the standalone distilled checkpoint. The
+# distilled file is self-contained (transformer + VAE + text-encoder
+# projections); the spatial upscaler is still required by DistilledPipeline
+# for its second-stage x2 upscale.
 LTX_FILES = [
-    "ltx-2.3-22b-dev.safetensors",
+    "ltx-2.3-22b-distilled-1.1.safetensors",
     "ltx-2.3-spatial-upscaler-x2-1.1.safetensors",
-    "ltx-2.3-22b-distilled-lora-384-1.1.safetensors",
 ]
 
 # Downloaded by earlier versions and left behind on any volume they touched.
-# No pipeline loads this checkpoint anymore: `distilled` now runs the dev
-# checkpoint with the distilled LoRA applied, which is the same model. At
-# 46 GB it was the difference between the weights fitting alongside
-# everything else on the volume and failing mid-download with EDQUOT, so it
-# is actively deleted rather than merely no longer fetched.
+# The previous revision served distilled as dev checkpoint + distillation
+# LoRA; this deployment loads the standalone distilled checkpoint instead,
+# so dev (~44 GB) and the LoRA are dead weight. Pruning them is also what
+# makes room for the 46 GB distilled file on an already-populated volume --
+# without it the download fails mid-way with EDQUOT.
 OBSOLETE_LTX_FILES = [
-    "ltx-2.3-22b-distilled-1.1.safetensors",
+    "ltx-2.3-22b-dev.safetensors",
+    "ltx-2.3-22b-distilled-lora-384-1.1.safetensors",
 ]
 
 
-COMPLETION_MARKER = ".download-complete"
+# Versioned per file-set: a volume marked complete by the dev+LoRA revision
+# holds none of the files this revision needs, so its old ".download-complete"
+# marker must not short-circuit the download. Bump the suffix whenever
+# LTX_FILES changes.
+LTX_COMPLETION_MARKER = ".download-complete-distilled-v2"
+GEMMA_COMPLETION_MARKER = ".download-complete"
+
+# Markers written by earlier revisions, superseded by the versioned one.
+OBSOLETE_LTX_MARKERS = [
+    ".download-complete",
+]
 
 
-def _is_complete(directory):
-    return os.path.exists(os.path.join(directory, COMPLETION_MARKER))
+def _is_complete(directory, marker_name):
+    return os.path.exists(os.path.join(directory, marker_name))
 
 
-def _mark_complete(directory):
-    with open(os.path.join(directory, COMPLETION_MARKER), "w") as marker:
+def _mark_complete(directory, marker_name):
+    with open(os.path.join(directory, marker_name), "w") as marker:
         marker.write("ok\n")
 
 
@@ -85,7 +99,8 @@ def ensure_models(target_dir):
     cheaper but leaks: every interrupted snapshot_download strands scratch
     files, and a crash loop piles up one set per restart until the volume is
     full and writes fail with EDQUOT. Bounded re-downloads beat unbounded
-    leaks. LTX is not reset -- it is 100 GB and already marked complete.
+    leaks. LTX is not reset -- its ~48 GB of files are fetched one at a time
+    via hf_hub_download and guarded by the versioned marker.
     """
     models_dir = os.path.abspath(target_dir)
     ltx_dir = os.path.join(models_dir, "ltx-2.3")
@@ -95,18 +110,21 @@ def ensure_models(target_dir):
 
     token = os.getenv("HF_TOKEN")
 
-    _prune(ltx_dir, OBSOLETE_LTX_FILES)
+    # Prune before the completion check so an old volume both reclaims the
+    # space the distilled checkpoint needs and drops the stale marker that
+    # would otherwise skip downloading it.
+    _prune(ltx_dir, OBSOLETE_LTX_FILES + OBSOLETE_LTX_MARKERS)
 
-    if _is_complete(ltx_dir):
-        print("[models] ltx-2.3 complete, skipping")
+    if _is_complete(ltx_dir, LTX_COMPLETION_MARKER):
+        print("[models] ltx-2.3 distilled complete, skipping")
     else:
         for filename in LTX_FILES:
             print(f"[models] ensuring {filename}...")
             hf_hub_download(repo_id=LTX_REPO, filename=filename, local_dir=ltx_dir, token=token)
-        _mark_complete(ltx_dir)
-        print("[models] ltx-2.3 complete")
+        _mark_complete(ltx_dir, LTX_COMPLETION_MARKER)
+        print("[models] ltx-2.3 distilled complete")
 
-    if _is_complete(gemma_dir):
+    if _is_complete(gemma_dir, GEMMA_COMPLETION_MARKER):
         print("[models] gemma-3 complete, skipping")
     else:
         print("[models] resetting partial gemma-3 download...")
@@ -118,7 +136,7 @@ def ensure_models(target_dir):
             token=token,
             ignore_patterns=["*.msgpack", "*.h5", "*.ot"],
         )
-        _mark_complete(gemma_dir)
+        _mark_complete(gemma_dir, GEMMA_COMPLETION_MARKER)
         print("[models] gemma-3 complete")
 
     return ltx_dir, gemma_dir
