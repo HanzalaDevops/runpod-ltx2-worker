@@ -58,13 +58,24 @@ STAGED_PATHS = {}
 # caller evict the warm pipeline for everyone queued behind it. Set
 # ALLOW_REQUEST_PIPELINE_OVERRIDE=1 to accept them from the payload for an A/B.
 #
-# fp8-cast is the default upstream ships, but the A40 is Ampere (SM 8.6) and
-# FP8 tensor cores only arrive with Ada (SM 8.9) -- so on this GPU the cast
-# buys memory footprint and no compute speedup, while costing cast time on
-# every component build. OffloadMode.NONE needs ~28 GB VRAM against the A40's
-# 48 GB, so it fits; it loads straight to GPU instead of streaming layer by
-# layer. Both are worth measuring with the timings below.
-DEFAULT_QUANTIZATION = os.getenv("LTX_QUANTIZATION", "fp8-cast")
+# Both default to what an A40 can actually run, and the two are coupled.
+#
+# QuantizationKind offers only FP8_CAST and FP8_SCALED_MM -- there is no int8
+# or bf16-compatible backend. The A40 is Ampere (SM 8.6) and FP8 tensor cores
+# only arrive with Ada (SM 8.9), so *no* quantization is available here; asking
+# for fp8-cast fails outright with an unsupported-hardware error.
+#
+# Unquantized, the 22B transformer is bf16: ~44 GB against 48 GB of VRAM, with
+# nothing left for activations. OffloadMode.NONE needs the full model resident,
+# so it cannot fit either. CPU offload is therefore not a tuning choice on this
+# GPU, it is the only mode that runs -- which is also why VRAM sits near idle
+# while weights stream through a ~5 GB buffer.
+#
+# Escaping that needs different hardware, not different settings: an FP8-capable
+# GPU (Ada/Hopper) makes fp8-cast work and drops the transformer to ~22 GB, or
+# a >=64 GB card fits bf16 resident. On the A40 the lever that remains is where
+# the weights are read from -- see the staging notes above.
+DEFAULT_QUANTIZATION = os.getenv("LTX_QUANTIZATION", "none")
 DEFAULT_OFFLOAD_MODE = os.getenv("LTX_OFFLOAD_MODE", "cpu")
 ALLOW_REQUEST_OVERRIDE = os.getenv("ALLOW_REQUEST_PIPELINE_OVERRIDE", "0") == "1"
 
