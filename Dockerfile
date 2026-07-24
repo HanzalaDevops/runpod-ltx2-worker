@@ -60,10 +60,12 @@ RUN pip install \
 WORKDIR /app
 
 # Copy handler and download scripts
-COPY handler.py download_models.py ./
+COPY handler.py download_models.py staging.py ./
 
-# Expose target models path
-RUN mkdir -p /workspace/models
+# Expose target models path, plus the local-disk cache the handler stages
+# weights into. /local-cache must live on the container disk, never on the
+# network volume -- staging exists precisely to get the reads off that volume.
+RUN mkdir -p /workspace/models /local-cache
 
 # Set the default entrypoint to runpod serverless handler
 CMD ["python", "-u", "handler.py"]
